@@ -1,0 +1,13 @@
+<launch>
+    <node name="lssn_rgb_seg" pkg="segmentator_2000" type="lssn_rgb_seg.py" />
+    <node name="lssn_pcl_seg" pkg="segmentator_2000" type="lssn_pcl_seg.py" />
+    <node name="lssn_detect" pkg="segmentator_2000" type="lssn_detect.py" output="screen"/>
+
+<!--     <node name="lssn_detect_node" pkg="segmentator_2000" type="lssn_detect_node.py"  output="screen"> -->
+<!--         <param name="object_class" type="string" value="cup" /> -->
+<!--         <param name="confidence" type="double" value="0.75" /> -->
+
+<!--         <param name="flipped" type="bool" value="False" /> -->
+<!--     </node> -->
+
+</launch>
