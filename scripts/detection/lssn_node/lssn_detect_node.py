@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cuts the image from camera feed using YOLOv5
+Cuts the image from camera feed using DETR
 """
 __author__ = 'Krzysztof Stezala <krzysztof.stezala at student.put.poznan.pl>'
 __version__ = '0.1'
@@ -8,16 +8,9 @@ __license__ = 'MIT'
 
 ## System
 import sys, time
-import argparse
-import os
-import shutil
-from pathlib import Path
 
 ## ROS
 import numpy as np
-import pandas as pd
-from scipy.ndimage import filters
-import roslib
 import rospy
 import ros_numpy
 
@@ -25,12 +18,11 @@ from sensor_msgs.msg import Image as sImage
 from geometry_msgs.msg import Pose, PoseStamped
 from segmentator_2000.srv import LssnRgbSeg, LssnRgbSegResponse
 from segmentator_2000.srv import LssnPclSeg, LssnPclSegResponse
+from segmentator_2000.srv import LssnTf, LssnTfResponse
 
-import tf
-import tf2_ros
-import tf2_geometry_msgs
-from tf.transformations import quaternion_from_euler
-
+# import tf
+# import tf2_ros
+# import tf2_geometry_msgs
 import cv2
 
 ##torch
@@ -40,11 +32,11 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 
 th.set_grad_enabled(False)
-th.cuda.empty_cache()
+#th.cuda.empty_cache()
 
 model = th.hub.load('facebookresearch/detr', 'detr_resnet101', pretrained=True)
 model.eval()
-model = model.cuda()
+#model = model.cuda()
 
 # standard PyTorch mean-std input image normalization
 transform = T.Compose([
@@ -85,6 +77,7 @@ class bootle_detect:
         self.image_sub = rospy.Subscriber("/xtion/rgb/image_raw", sImage, self.callback, queue_size=1)
         self.posestamped_pub = rospy.Publisher("/lssn_pose", PoseStamped, queue_size=10)
         rospy.wait_for_service('lssn_rgb_seg')
+        rospy.wait_for_service('lssn_tf')
         self.object_class = rospy.get_param('~object_class', 'cup')
 
 
@@ -102,7 +95,8 @@ class bootle_detect:
         # run inference
         now = rospy.Time.now()
         img = Image.fromarray(np_image).resize((800, 600)).convert('RGB')
-        img_tens = transform(img).unsqueeze(0).cuda()
+        #img_tens = transform(img).unsqueeze(0).cuda()
+        img_tens = transform(img).unsqueeze(0)
         with th.no_grad():
             output = model(img_tens)
 
@@ -126,7 +120,6 @@ class bootle_detect:
 
         pred_logits = pred_logits[m_output_inds]
         pred_boxes = pred_boxes[m_output_inds]
-        pred_logits.shape
 
         im2 = img.copy()
         drw = ImageDraw.Draw(im2)
@@ -145,6 +138,9 @@ class bootle_detect:
             y0, y1 = y - h // 2, y + h // 2
             drw.rectangle([x0, y0, x1, y1], outline='red', width=5)
             drw.text((x, y), label, fill='pink')
+            print(label,640*x/800,480*y/600)
+            real_x = 640*x/800
+            real_y = 480*y/600
 
         if "cup" in labels:
             self.last_frames.append(True)
@@ -180,41 +176,11 @@ class bootle_detect:
                 end = rospy.Time.now()
                 print("Time pcl segmentation: ", (end - now).to_sec())
                 if bottle_pose.header.frame_id == "xtion_depth_frame":
-                    try:
-                        tf_buffer = tf2_ros.Buffer(rospy.Duration(1.0))  # tf buffer length
-                        tf_listener = tf2_ros.TransformListener(tf_buffer)
-                        tf_transform = tf_buffer.lookup_transform("odom",
-                                                                  bottle_pose.header.frame_id,  # source frame
-                                                                  rospy.Time(0),  # get the tf at first available time
-                                                                  rospy.Duration(4.0))
-                        pose_transformed = tf2_geometry_msgs.do_transform_pose(bottle_pose, tf_transform)
-                        br = tf.TransformBroadcaster()
+                    lssn_tf_prox = rospy.ServiceProxy('lssn_tf', LssnTf)
+                    res_pose = lssn_tf_prox(bottle_pose)
+                    #
+                    self.posestamped_pub.publish(res_pose.obj_pose)
 
-                        # roll=0
-                        # pitch=3.14
-                        # yaw=0
-                        # q = quaternion_from_euler(roll,pitch,yaw)
-                        # pose_transformed.pose.orientation.x = q[0]
-                        # pose_transformed.pose.orientation.y = q[1]
-                        # pose_transformed.pose.orientation.z = q[2]
-                        # pose_transformed.pose.orientation.w = q[3]
-                        pose_transformed.pose.orientation.x = bottle_pose.pose.orientation.x
-                        pose_transformed.pose.orientation.y = bottle_pose.pose.orientation.y
-                        pose_transformed.pose.orientation.z = bottle_pose.pose.orientation.z
-                        pose_transformed.pose.orientation.w = bottle_pose.pose.orientation.w
-                        print(pose_transformed)
-                        br.sendTransform((pose_transformed.pose.position.x,
-                                          pose_transformed.pose.position.y,
-                                          pose_transformed.pose.position.z),
-                                         (pose_transformed.pose.orientation.x,
-                                          pose_transformed.pose.orientation.y,
-                                          pose_transformed.pose.orientation.z,
-                                          pose_transformed.pose.orientation.w), rospy.Time.now(), "cup", "odom")
-
-                    except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
-                        print("tf not working")
-
-                    self.posestamped_pub.publish(pose_transformed)
 
                 self.last_frames = []
                 self.rate.sleep()
@@ -228,6 +194,8 @@ class bootle_detect:
         msg.step = 3 * im2.width
         msg.data = np.array(im2).tobytes()
         self.image_pub.publish(msg)
+
+
 
 
 def main():

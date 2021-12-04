@@ -11,6 +11,13 @@ import io
 import torch
 import torchvision.transforms as T
 import numpy
+from math import floor
+
+from sensor_msgs.msg import Image as sImage
+from geometry_msgs.msg import Pose, PoseStamped
+from segmentator_2000.srv import LssnRgbSeg, LssnRgbSegResponse
+from segmentator_2000.srv import LssnPclSeg, LssnPclSegResponse
+from segmentator_2000.srv import LssnTf, LssnTfResponse
 
 from panopticapi.utils import rgb2id
 from copy import deepcopy
@@ -20,7 +27,7 @@ import ros_numpy
 import matplotlib.pyplot as plot
 
 torch.set_grad_enabled(False)
-torch.cuda.empty_cache()
+#torch.cuda.empty_cache()
 
 # standard PyTorch mean-std input image normalization
 transform = T.Compose([
@@ -32,7 +39,7 @@ transform = T.Compose([
 model, postprocessor = torch.hub.load('facebookresearch/detr', 'detr_resnet101_panoptic', pretrained=True,
                                       return_postprocessor=True, num_classes=250)
 model.eval()
-model = model.cuda()
+#model = model.cuda()
 
 ## Classes from COCO
 CLASSES = [
@@ -66,14 +73,27 @@ class lssn_detect:
         rospy.init_node('lssn_detect_server')
         #TODO
         rgb_topic = "/xtion/rgb/image_raw"
+        depth_topic = "/xtion/depth_registered/image_raw"
+        camera_topic = "/xtion/depth_registered/camera_info"
         sub_rgb = message_filters.Subscriber(rgb_topic, sensor_msgs.msg.Image)
-        self.cache_rgb = message_filters.Cache(sub_rgb, cache_size=5, allow_headerless=True)
+        self.cache_rgb = message_filters.Cache(sub_rgb, cache_size=1, allow_headerless=True)
+
+        sub_depth = message_filters.Subscriber(depth_topic, sensor_msgs.msg.Image)
+        self.cache_depth = message_filters.Cache(sub_depth, cache_size=5, allow_headerless=True)
+
+        sub_info = message_filters.Subscriber(camera_topic, sensor_msgs.msg.CameraInfo)
+        self.cache_info = message_filters.Cache(sub_info, cache_size=5, allow_headerless=True)
+
+        self.rgb_img = numpy.empty((640,480))
         self.object_class = rospy.get_param('~object_class', 'cup')
         self.confidence = rospy.get_param('~confidence', 0.5)
         self.flipped_img = rospy.get_param('~flipped', False)
         s = rospy.Service('lssn_detect', LssnDetect, self.handle_data)
+        self.posestamped_pub = rospy.Publisher("/lssn_pose", PoseStamped, queue_size=10)
+        rospy.wait_for_service('lssn_tf')
         rospy.loginfo("Lssn Detect ready to handle data.")
         rospy.spin()
+
 
     def check_usr_classes(self, req):
         user_cls = req.classes
@@ -91,13 +111,19 @@ class lssn_detect:
         user_cls = self.check_usr_classes(req)
         rospy.loginfo("Looking for: %s" % user_cls)
 
+        data_info = self.cache_info.cache_msgs[-1]
+        data_depth = self.cache_depth.cache_msgs[-1]
+
         data_rgb = self.cache_rgb.cache_msgs[-1]
         image_rgb = ros_numpy.numpify(data_rgb)
 
         # # mean-std normalize the input image (batch-size: 1)
-        now = rospy.Time.now()
         img = Image.fromarray(numpy.uint8(image_rgb)).resize((800, 600)).convert('RGB')
-        img_tens = transform(img).unsqueeze(0).cuda()
+        # plot.imshow(img)
+        # plot.axis('off')
+        # plot.show()
+        #img_tens = transform(img).unsqueeze(0).cuda()
+        img_tens = transform(img).unsqueeze(0)
         with torch.no_grad():
             output = model(img_tens)
 
@@ -110,9 +136,10 @@ class lssn_detect:
 
         pred_logits = pred_logits[m_output_inds]
         pred_boxes = pred_boxes[m_output_inds]
-        pred_logits.shape
 
         labels = []
+        real_x_s = []
+        real_y_s = []
 
         for logits, box in zip(pred_logits, pred_boxes):
             cls = logits.argmax()
@@ -120,12 +147,36 @@ class lssn_detect:
                 continue
             label = CLASSES[cls]
             labels.append(label)
+            box = box.cpu() * torch.Tensor([800, 600, 800, 600])
+            x, y, w, h = box
+            real_x = floor(640 * x.item() / 800)
+            real_y = floor(480 * y.item() / 600)
+            print(label, real_x, real_y)
+            real_x_s.append(real_x)
+            real_y_s.append(real_y)
 
-        end = rospy.Time.now()
-        torch.cuda.empty_cache()
-        print(labels)
         if "cup" in labels:
-            torch.cuda.empty_cache()
+            # lssn_rgb_prox = rospy.ServiceProxy('lssn_rgb_seg', LssnRgbSeg)
+            # resp = LssnRgbSegResponse()
+            # resp = lssn_rgb_prox(["cup"])
+            # end = rospy.Time.now()
+            # print("Time rgb segmentation: ", (end - now).to_sec())
+            # print("starting service pcl")
+            # now = rospy.Time.now()
+            lssn_pcl_prox = rospy.ServiceProxy('lssn_pcl_seg', LssnPclSeg)
+            obj_poses = lssn_pcl_prox(data_info,
+                                     data_depth,
+                                     labels,
+                                     real_x_s,
+                                     real_y_s)
+            bottle_pose = obj_poses.obj_poses
+            # end = rospy.Time.now()
+            # print("Time pcl segmentation: ", (end - now).to_sec())
+            if bottle_pose.header.frame_id == "xtion_depth_frame":
+                lssn_tf_prox = rospy.ServiceProxy('lssn_tf', LssnTf)
+                res_pose = lssn_tf_prox(bottle_pose)
+                #
+                self.posestamped_pub.publish(res_pose.obj_pose)
             return LssnDetectResponse(True)
         else:
             return LssnDetectResponse(False)

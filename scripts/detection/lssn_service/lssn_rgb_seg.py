@@ -21,7 +21,7 @@ import ros_numpy
 import matplotlib.pyplot as plot
 
 torch.set_grad_enabled(False)
-torch.cuda.empty_cache()
+#torch.cuda.empty_cache()
 
 # standard PyTorch mean-std input image normalization
 transform = T.Compose([
@@ -32,7 +32,7 @@ transform = T.Compose([
 
 model, postprocessor = torch.hub.load('facebookresearch/detr', 'detr_resnet101_panoptic', pretrained=True, return_postprocessor=True, num_classes=250)
 model.eval()
-model = model.cuda()
+#model = model.cuda()
 
 ## Classes from COCO
 CLASSES = [
@@ -99,15 +99,19 @@ class LssnRgbSegServer:
         data_info = self.cache_info.cache_msgs[-1]
         data_depth = self.cache_depth.cache_msgs[-1]
         data_rgb = self.cache_rgb.cache_msgs[-1]
-        image_depth = ros_numpy.numpify(data_depth)
         image_rgb = ros_numpy.numpify(data_rgb)
         im = Image.fromarray(numpy.uint8(image_rgb))
         ## Image keeps original image resolution
         original_im_shape = im.size
 
+        # plot.imshow(im)
+        # plot.axis('off')
+        # plot.show()
+
         # # mean-std normalize the input image (batch-size: 1)
         with torch.no_grad():
-            img = transform(im).unsqueeze(0).cuda()
+            #img = transform(im).unsqueeze(0).cuda()
+            img = transform(im).unsqueeze(0)
             out = model(img)
 
         # the post-processor expects as input the target size of the predictions (which we set here to the image size)
@@ -117,6 +121,7 @@ class LssnRgbSegServer:
         panoptic_seg = Image.open(io.BytesIO(result['png_string']))
 
         panoptic_seg = numpy.array(panoptic_seg, dtype=numpy.uint8).copy()
+
         # We retrieve the ids corresponding to each mask
         panoptic_seg_id = rgb2id(panoptic_seg)
 
@@ -150,26 +155,31 @@ class LssnRgbSegServer:
         for id in range(panoptic_seg_id.max() + 1):
             if id in id_lst:
                 segment = deepcopy(panoptic_seg)
+
                 segment[panoptic_seg_id == id] = 255
                 segment = resize(segment, (original_im_shape[1], original_im_shape[0]))
+
                 segment = segment * 255
                 segment[segment > 127] = 255
                 segment[segment < 127] = 0
-                segment[segment > 127] = 1
+                #segment[segment > 127] = 255
                 class_list.append(d[id])
                 # plot.imshow(segment)
                 # plot.axis('off')
                 # plot.show()
 
                 segment = segment.astype(numpy.uint8)
+                # plot.imshow(segment)
+                # plot.axis('off')
+                # plot.show()
 
                 msg = ros_numpy.msgify(sensor_msgs.msg.Image, segment, encoding='8UC3')
 
                 mask_list.append(msg)
                 rospy.loginfo("Adding mask")
-
+        print(class_list)
         rospy.loginfo("Returning data")
-        torch.cuda.empty_cache()
+        #torch.cuda.empty_cache()
         return LssnRgbSegResponse(data_info, data_rgb, data_depth, class_list, mask_list)
 
 

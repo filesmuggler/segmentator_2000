@@ -1,7 +1,7 @@
 sensor_msgs/CameraInfo cam_info
-sensor_msgs/Image rgb_image
 sensor_msgs/Image depth_image
-string[] class_list
-sensor_msgs/Image[] mask_list
+string[] labels
+int64[] x_s
+int64[] y_s
 ---
 geometry_msgs/PoseStamped obj_poses
